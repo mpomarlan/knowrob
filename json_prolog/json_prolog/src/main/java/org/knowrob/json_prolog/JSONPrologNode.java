@@ -48,8 +48,12 @@ import org.ros.node.ConnectedNode;
 import org.ros.node.parameter.ParameterTree;
 import org.ros.node.service.ServiceResponseBuilder;
 
+import org.jpl7.JPL;
+
 /**
  * ROS service interface to rosprolog
+ *
+ * @todo Concurrent processing of threadsafe queries.
  * 
  * @author Lorenz Moesenlechner
  * @author Moritz Tenorth
@@ -59,7 +63,7 @@ public class JSONPrologNode extends AbstractNodeMain {
 	
 	private ExecutorService queryThreadPool = Executors.newFixedThreadPool(10);
 
-	private Hashtable<String, PrologSolutions> queries;
+	private Map<String, PrologSolutions> queries;
 	
 	private boolean hasIncrementalQuery = false;
 	
@@ -73,7 +77,7 @@ public class JSONPrologNode extends AbstractNodeMain {
 
 	public JSONPrologNode(String initpkg) {
 		this.initPackage=initpkg;
-		queries = new Hashtable<String, PrologSolutions>();
+		queries = new java.util.HashMap<String, PrologSolutions>();
 	}
 
 	@Override
@@ -86,7 +90,7 @@ public class JSONPrologNode extends AbstractNodeMain {
 		this.connectedNode = connectedNode;
 
 		// initialize the Prolog environment
-		synchronized(jpl.Query.class) {
+		synchronized(org.jpl7.Query.class) {
 
 			try {
 				initProlog();
@@ -111,7 +115,7 @@ public class JSONPrologNode extends AbstractNodeMain {
 			if(!this.initPackage.equals("")) {
 
 				try {
-					new jpl.Query("ensure_loaded('" + findRosPackage(initPackage) + "/prolog/init.pl')").oneSolution();
+					new org.jpl7.Query("ensure_loaded('" + findRosPackage(initPackage) + "/prolog/init.pl')").oneSolution();
 				} catch (IOException e) {
 					connectedNode.getLog().error("IO error when searching for Prolog init file", e);
 				} catch (InterruptedException e) {
@@ -123,7 +127,7 @@ public class JSONPrologNode extends AbstractNodeMain {
 
 			if(params.has("initial_goal")) {
 				String goal = params.getString("initial_goal");
-				new jpl.Query(goal).oneSolution();
+				new org.jpl7.Query(goal).oneSolution();
 			}
 		}
 
@@ -144,21 +148,14 @@ public class JSONPrologNode extends AbstractNodeMain {
 	private class QueryCallback implements ServiceResponseBuilder<
 				json_prolog_msgs.PrologQueryRequest,json_prolog_msgs.PrologQueryResponse> {
 		@Override
-		public void build(json_prolog_msgs.PrologQueryRequest request, json_prolog_msgs.PrologQueryResponse response) {
-			// TODO(daniel): why should we close? Could be two different clients
-			//if(!closeIncrementalQuery(response)) {
-			//	response.setOk(false);
-			//	response.setMessage("Failed to close incremental query.");
-			//	return;
-			//}
-			
+		public void build(json_prolog_msgs.PrologQueryRequest request, json_prolog_msgs.PrologQueryResponse response) {	
 			if ( queries.get(request.getId()) != null ) {
 				response.setOk(false);
 				response.setMessage("Already processing a query with id " + request.getId());
 			}
 			else {
 				try {
-					synchronized(jpl.Query.class) {
+					synchronized(org.jpl7.Query.class) {
 						ThreadedQuery currentQuery = JSONQuery.makeQuery(request.getQuery());
 						String currentQueryId = request.getId();
 						
@@ -195,14 +192,7 @@ public class JSONPrologNode extends AbstractNodeMain {
 		public void build(json_prolog_msgs.PrologQueryRequest request,
 						json_prolog_msgs.PrologQueryResponse response) {
 			try {
-				// TODO(daniel): why should we close? Could be two different clients
-				//if(!closeIncrementalQuery(response)) {
-				//	response.setOk(false);
-				//	response.setMessage("Failed to close incremental query.");
-				//	return;
-				//}
-				
-				synchronized(jpl.Query.class) {
+				synchronized(org.jpl7.Query.class) {
 					if (queries.get(request.getId()) != null ) {
 						response.setOk(false);
 						response.setMessage("Already processing a query with id " + request.getId());
@@ -214,7 +204,6 @@ public class JSONPrologNode extends AbstractNodeMain {
 						ThreadedQuery currentQuery = new ThreadedQuery(
 								"expand_goal(("+userQuery+"),_Q), call(_Q)");
 						String currentQueryId = request.getId();
-						
 						// Add the query to the thread pool
 						queryThreadPool.submit(currentQuery);
 						
@@ -236,32 +225,6 @@ public class JSONPrologNode extends AbstractNodeMain {
 		}
 	}
 
-	private boolean closeIncrementalQuery(PrologQueryResponse response) {
-		// If there is an incremental query active, just close it
-		if (hasIncrementalQuery) {
-			String queryId = null;
-			
-			for(Entry<String, PrologSolutions> e : queries.entrySet()) {
-				if(e.getValue() instanceof PrologIncrementalSolutions) {
-					queryId = e.getKey();
-					break;
-				}
-			}
-			
-			if(queryId==null) {
-				return false;
-			}
-			else {
-				removeQuery(queryId);
-				return true;
-			}
-		}
-		else {
-			return true;
-		}
-	}
-
-
 	/**
 	 * Callback for the NextSolution service
 	 * 
@@ -276,8 +239,8 @@ public class JSONPrologNode extends AbstractNodeMain {
 		@Override
 		public void build(json_prolog_msgs.PrologNextSolutionRequest request, json_prolog_msgs.PrologNextSolutionResponse response) {
 			try {
-				synchronized(jpl.Query.class) {
-					PrologSolutions currentQuery = queries.get(request.getId());
+                                synchronized(org.jpl7.Query.class) {
+				PrologSolutions currentQuery = queries.get(request.getId());
 					if (currentQuery == null) {
 						response.setStatus(json_prolog_msgs.PrologNextSolutionResponse.WRONG_ID);
 					}
@@ -289,7 +252,7 @@ public class JSONPrologNode extends AbstractNodeMain {
 							}
 						}
 						else if(isQueryThreadValid(currentQuery)) {
-							Hashtable<String, jpl.Term> solution = (Hashtable<String, jpl.Term>) currentQuery.nextSolution();
+							java.util.Map solution = currentQuery.nextSolution();
 							if(isQueryThreadValid(currentQuery)) {
 								response.setSolution(JSONQuery.encodeResult(solution).toString());
 								response.setStatus(json_prolog_msgs.PrologNextSolutionResponse.OK);
@@ -335,7 +298,7 @@ public class JSONPrologNode extends AbstractNodeMain {
 		public void build(json_prolog_msgs.PrologFinishRequest request, json_prolog_msgs.PrologFinishResponse response) {
 			// finish all queries
 			if (request.getId().equals("*")){
-				Enumeration<String> e = queries.keys();
+				Enumeration<String> e = java.util.Collections.enumeration(queries.keySet());
 				while(e.hasMoreElements())
 					removeQuery(e.nextElement());
 			} else {
@@ -390,13 +353,13 @@ public class JSONPrologNode extends AbstractNodeMain {
 	 */
 	private static void initProlog() throws IOException, InterruptedException,
 	RospackError {
-		Vector<String> pl_args = new Vector<String>(Arrays.asList(jpl.JPL.getDefaultInitArgs()));
+		Vector<String> pl_args = new Vector<String>(Arrays.asList(org.jpl7.JPL.getDefaultInitArgs()));
 		pl_args.set(0, "/usr/bin/swipl");
 		pl_args.add("-G256M");
 		pl_args.add("-nosignals");
-		jpl.JPL.setDefaultInitArgs(pl_args.toArray(new String[0]));
-		jpl.JPL.init();
-		new jpl.Query("ensure_loaded('" + findRosPackage("rosprolog") + "/prolog/init.pl')").oneSolution();
+		org.jpl7.JPL.setDefaultInitArgs(pl_args.toArray(new String[0]));
+		org.jpl7.JPL.init();
+		new org.jpl7.Query("ensure_loaded('" + findRosPackage("rosprolog") + "/prolog/init.pl')").oneSolution();
 	}
 
 	/**
@@ -410,6 +373,7 @@ public class JSONPrologNode extends AbstractNodeMain {
 	 */
 	private static String findRosPackage(String name) throws IOException, InterruptedException, RospackError {
 
+		System.out.print(name);
 		Process rospack = Runtime.getRuntime().exec("rospack find " + name);
 		if (rospack.waitFor() != 0)
 			throw new RospackError();
